@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+.uv-cache/
+.test-tmp/
+dist/
+build/
+*.egg-info/
+uv.lock
+box/
+token
+config.toml
+*.log
+*.bak
+.DS_Store

@@ -9,7 +9,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from .store import Store
+from .store import Store, validate_client_id
 
 LOG = logging.getLogger("dotline.http")
 ROUTES = {"/v1/health", "/v1/messages", "/v1/replies"}
@@ -150,12 +150,21 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))
             if not isinstance(body, dict):
                 raise ValueError
-            record = self.server.store.send(body.get("text"), body.get("topic", ""))
+            client_id = validate_client_id(body["client_id"]) if "client_id" in body else None
+            record, duplicate = self.server.store.send_once(body.get("text"), body.get("topic", ""), client_id)
         except (ValueError, UnicodeDecodeError):
-            self._respond(400, {"error": "expected text of 1 to 8000 characters and topic of at most 120"})
+            self._respond(
+                400,
+                {"error": "expected text of 1 to 8000 characters, topic of at most 120 "
+                          "and an optional client_id of 1 to 64 characters"},
+            )
             return
         except TimeoutError:
             self._respond(408, {"error": "body read timed out"})
+            return
+        if duplicate:
+            # The same client_id was already stored: nothing was created. Answer with the original.
+            self._respond(200, {"id": record["id"], "ts": record["ts"], "duplicate": True})
             return
         self._respond(201, {"id": record["id"], "ts": record["ts"]})
 

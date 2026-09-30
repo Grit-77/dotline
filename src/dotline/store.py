@@ -11,6 +11,7 @@ from pathlib import Path
 from .config import private_dir, private_write
 
 CLAIM_SECONDS = 30 * 60
+CLIENT_ID_MAX = 64
 _thread_lock = threading.RLock()
 
 
@@ -22,6 +23,12 @@ def validate_text(text: object) -> str:
     if not isinstance(text, str) or not 1 <= len(text) <= 8000:
         raise ValueError("text must contain 1 to 8000 characters")
     return text
+
+
+def validate_client_id(client_id: object) -> str:
+    if not isinstance(client_id, str) or not 1 <= len(client_id) <= CLIENT_ID_MAX:
+        raise ValueError(f"client_id must contain 1 to {CLIENT_ID_MAX} characters")
+    return client_id
 
 
 def timestamp() -> str:
@@ -118,18 +125,35 @@ class Store:
         with self.locked():
             return [item for item in self._read(self.replies) if item["id"] > after]
 
-    def send(self, text: str, topic: str = "") -> dict:
+    def send(self, text: str, topic: str = "", client_id: str | None = None) -> dict:
+        return self.send_once(text, topic, client_id)[0]
+
+    def send_once(self, text: str, topic: str = "", client_id: str | None = None) -> tuple[dict, bool]:
+        """Append a message; return (record, duplicate).
+
+        A client_id that is already in the inbox appends nothing and returns the original
+        record. The lookup and the append share one lock hold, so concurrent sends of the same
+        client_id, even from different processes, still produce exactly one record.
+        """
         validate_text(text)
         if not isinstance(topic, str) or len(topic) > 120:
             raise ValueError("topic must be a string of at most 120 characters")
+        if client_id is not None:
+            validate_client_id(client_id)
         with self.locked():
             records = self._read(self.inbox)
+            if client_id is not None:
+                for item in records:
+                    if item.get("client_id") == client_id:
+                        return item, True
             record = {
                 "id": max((item["id"] for item in records), default=0) + 1,
                 "ts": timestamp(), "text": text, "topic": topic,
             }
+            if client_id is not None:
+                record["client_id"] = client_id
             self._append(self.inbox, record)
-            return record
+            return record, False
 
     @staticmethod
     def _valid_id(message_id: int) -> None:

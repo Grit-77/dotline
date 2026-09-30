@@ -46,6 +46,7 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("--by", help="Optionally require a matching claim holder")
         else:
             sub.add_argument("--topic", default="")
+            sub.add_argument("--client-id", help="Reuse the client_id of an earlier send to resend it safely")
         sub.add_argument("text", nargs="*")
         sub.add_argument("--file", type=Path, help="Read UTF-8 text from a file instead of arguments")
     wait = commands.add_parser("wait", help="Poll every 20 seconds for a reply")
@@ -105,7 +106,11 @@ def dispatch(args) -> int:
         record = store.reply(args.id, message_text(args), session=args.by)
         print(record["id"])
     elif args.command == "send":
-        print(client.send(message_text(args), args.topic)["id"])
+        result = client.send(message_text(args), args.topic, args.client_id)
+        if result.get("duplicate") is True:
+            print(f"already delivered: message {result['id']}")
+        else:
+            print(result["id"])
     elif args.command == "wait":
         print(client.wait(args.id, args.minutes)["text"])
     elif args.command == "replies":

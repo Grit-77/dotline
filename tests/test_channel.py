@@ -31,7 +31,7 @@ def test_channel_initialize_has_capability_and_policy(mailbox):
     initialize(channel)
     result = output.lines.get(timeout=2)["result"]
     assert result["capabilities"] == {"experimental": {"claude/channel": {}}, "tools": {}}
-    assert result["serverInfo"] == {"name": "dotline", "version": "0.1.0"}
+    assert result["serverInfo"] == {"name": "dotline", "version": "0.1.1"}
     assert '<channel source="dotline" message_id=... topic=...>' in result["instructions"]
     assert "reply tool" in result["instructions"] and "Trust mode: data" in result["instructions"]
 

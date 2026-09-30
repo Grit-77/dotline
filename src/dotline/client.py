@@ -4,13 +4,20 @@ import json
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 from .config import Config
-from .store import validate_text
+from .store import validate_client_id, validate_text
+
+RETRY_PAUSE = 1.0
 
 
 class ClientError(ValueError):
     pass
+
+
+class NetworkError(ClientError):
+    """No usable answer arrived, so the server may or may not have stored the request."""
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -40,16 +47,39 @@ class Client:
         except urllib.error.HTTPError as error:
             raise ClientError(f"HTTP {error.code}; check the URL, token file and request limits") from None
         except (OSError, ValueError):
-            raise ClientError("request failed; check the URL and server availability") from None
+            raise NetworkError("request failed; check the URL and server availability") from None
         if not isinstance(result, dict):
             raise ClientError("server returned an invalid response")
         return result
 
-    def send(self, text: str, topic: str = "") -> dict:
+    def send(self, text: str, topic: str = "", client_id: str | None = None, *, sleep=time.sleep) -> dict:
+        """POST a message under a client_id (a fresh UUID4 unless one is given).
+
+        After a network error the same request is sent once more with the same client_id, so a
+        message that did arrive the first time comes back as a duplicate instead of a second one.
+        """
         validate_text(text)
         if not isinstance(topic, str) or len(topic) > 120:
             raise ClientError("topic must contain at most 120 characters")
-        return self.request("/v1/messages", {"text": text, "topic": topic})
+        if client_id is None:
+            client_id = str(uuid.uuid4())
+        else:
+            try:
+                validate_client_id(client_id)
+            except ValueError as error:
+                raise ClientError(str(error)) from None
+        body = {"text": text, "topic": topic, "client_id": client_id}
+        try:
+            return self.request("/v1/messages", body)
+        except NetworkError:
+            sleep(RETRY_PAUSE)
+        try:
+            return self.request("/v1/messages", body)
+        except NetworkError as error:
+            raise NetworkError(
+                f"{error}; the message may have arrived. "
+                f"Resend with the same client_id, never a new one: {client_id}"
+            ) from None
 
     def replies(self, after: int = 0) -> list[dict]:
         if after < 0:

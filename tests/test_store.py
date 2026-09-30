@@ -170,3 +170,31 @@ def test_torn_tail_does_not_join_next_record(mailbox):
         stream.write(b'{"id":2,"text":')
     assert store.send("Next")["id"] == 2
     assert [message["text"] for message in store.messages_after()] == ["First", "Next"]
+
+
+SEND_AT = """
+import sys, time
+from pathlib import Path
+from dotline.store import Store
+
+home, client_id, start = sys.argv[1], sys.argv[2], float(sys.argv[3])
+while time.time() < start:
+    time.sleep(0.001)
+record, duplicate = Store(Path(home)).send_once("one send", "", client_id)
+print(record["id"], duplicate)
+"""
+
+
+def test_concurrent_processes_with_the_same_client_id_leave_one_record(mailbox):
+    config, store = mailbox
+    start = time.time() + 2
+    commands = [
+        [sys.executable, "-c", SEND_AT, str(config.home), "same-send", str(start)] for _ in range(4)
+    ]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda command: subprocess.run(command, capture_output=True, text=True, timeout=30), commands))
+    assert [result.returncode for result in results] == [0, 0, 0, 0], [result.stderr for result in results]
+    # Every process sees the same message; exactly one of them created it.
+    assert sorted(result.stdout.strip() for result in results) == ["1 False", "1 True", "1 True", "1 True"]
+    assert [message["client_id"] for message in store.messages_after()] == ["same-send"]
+    assert len(store.inbox.read_text(encoding="utf-8").splitlines()) == 1

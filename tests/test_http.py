@@ -133,3 +133,48 @@ def test_concurrent_http_appends_assign_unique_ids(api):
     assert all(item[0] == 201 for item in results)
     assert sorted(item[2]["id"] for item in results) == list(range(1, 13))
     assert len(api[2].messages_after()) == 12
+
+
+def inbox_lines(api):
+    return [line for line in api[2].inbox.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_first_post_with_a_client_id_answers_201_and_stores_it_on_the_record(api):
+    status, _, body = request(api, "POST", body={"text": "hello", "client_id": "send-0001"})
+    assert status == 201
+    assert body == {"id": 1, "ts": body["ts"]}
+    assert api[2].messages_after()[0]["client_id"] == "send-0001"
+
+
+def test_repeat_of_a_client_id_answers_200_duplicate_with_the_same_id_and_adds_no_line(api):
+    first_status, _, first = request(api, "POST", body={"text": "hello", "client_id": "send-0001"})
+    status, _, again = request(api, "POST", body={"text": "hello", "client_id": "send-0001"})
+    assert first_status == 201
+    assert status == 200
+    assert again == {"id": first["id"], "ts": first["ts"], "duplicate": True}
+    assert len(inbox_lines(api)) == 1
+
+
+def test_client_id_alone_decides_a_duplicate_even_when_the_text_differs(api):
+    _, _, first = request(api, "POST", body={"text": "original", "client_id": "send-0001"})
+    status, _, again = request(api, "POST", body={"text": "changed", "topic": "new", "client_id": "send-0001"})
+    assert status == 200 and again["id"] == first["id"]
+    assert [item["text"] for item in api[2].messages_after()] == ["original"]
+
+
+def test_a_different_client_id_creates_a_second_message(api):
+    first = request(api, "POST", body={"text": "hello", "client_id": "send-0001"})
+    second = request(api, "POST", body={"text": "hello", "client_id": "send-0002"})
+    assert (first[0], second[0]) == (201, 201)
+    assert (first[2]["id"], second[2]["id"]) == (1, 2)
+    assert len(inbox_lines(api)) == 2
+
+
+@pytest.mark.parametrize("client_id", ["x" * 65, "", 7, None, ["send-0001"]])
+def test_an_invalid_client_id_is_400_and_creates_nothing(api, client_id):
+    assert request(api, "POST", body={"text": "hello", "client_id": client_id})[0] == 400
+    assert inbox_lines(api) == []
+
+
+def test_a_64_character_client_id_is_accepted(api):
+    assert request(api, "POST", body={"text": "hello", "client_id": "x" * 64})[0] == 201

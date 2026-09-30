@@ -1,5 +1,7 @@
 import io
+import json
 import os
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -9,7 +11,7 @@ import pytest
 
 from dotline import config as config_module
 from dotline.cli import main
-from dotline.client import Client, ClientError
+from dotline.client import RETRY_PAUSE, Client, ClientError
 from dotline.config import config_home, initialize, load_config, parse_config
 
 
@@ -180,7 +182,81 @@ def test_missing_token_file_errors_do_not_print_its_content(mailbox, monkeypatch
 def test_package_version_and_runtime_dependencies():
     from dotline import __version__
 
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.1.1"
     project = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dependencies = []' in project
     assert 'requires-python = ">=3.10"' in project
+
+
+def is_uuid4(value):
+    parsed = uuid.UUID(value)
+    return parsed.version == 4 and parsed.variant == uuid.RFC_4122 and str(parsed) == value
+
+
+class ScriptedOpener:
+    """Stands in for urllib's opener: every call consumes one prepared outcome."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.bodies = []
+
+    def open(self, request, timeout):
+        self.bodies.append(json.loads(request.data))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return io.BytesIO(json.dumps(outcome).encode("utf-8"))
+
+
+def test_client_retries_once_with_the_same_client_id_after_a_connection_error(mailbox):
+    client = Client(mailbox[0])
+    client.opener = ScriptedOpener(ConnectionResetError("reset"), {"id": 4, "ts": "then", "duplicate": True})
+    pauses = []
+    assert client.send("hello", "topic", sleep=pauses.append) == {"id": 4, "ts": "then", "duplicate": True}
+    first, second = client.opener.bodies
+    assert first == second and first["text"] == "hello"
+    assert is_uuid4(first["client_id"])
+    assert pauses == [RETRY_PAUSE]
+
+
+def test_client_retries_only_once_and_then_names_the_client_id_to_resend_with(mailbox):
+    client = Client(mailbox[0])
+    client.opener = ScriptedOpener(TimeoutError("slow"), ConnectionRefusedError("down"))
+    with pytest.raises(ClientError) as error:
+        client.send("hello", sleep=lambda seconds: None)
+    assert len(client.opener.bodies) == 2
+    assert client.opener.bodies[0]["client_id"] in str(error.value)
+
+
+def test_client_does_not_retry_an_http_error_status(mailbox):
+    client = Client(mailbox[0])
+    client.opener = ScriptedOpener(HTTPError("http://127.0.0.1", 500, "error", {}, None))
+    with pytest.raises(ClientError, match="HTTP 500"):
+        client.send("hello", sleep=lambda seconds: None)
+    assert len(client.opener.bodies) == 1
+
+
+def test_client_refuses_an_overlong_client_id_before_sending(mailbox):
+    client = Client(mailbox[0])
+    client.opener = ScriptedOpener()
+    with pytest.raises(ClientError, match="client_id"):
+        client.send("hello", client_id="x" * 65)
+    assert client.opener.bodies == []
+
+
+def test_every_cli_send_uses_a_fresh_uuid4_client_id(api, capsys):
+    _, _, store = api
+    assert main(["send", "first"]) == 0 and main(["send", "second"]) == 0
+    assert capsys.readouterr().out.split() == ["1", "2"]
+    ids = [message["client_id"] for message in store.messages_after()]
+    assert ids[0] != ids[1]
+    assert all(is_uuid4(value) for value in ids)
+
+
+def test_cli_send_with_a_used_client_id_prints_already_delivered(api, capsys):
+    _, _, store = api
+    assert main(["send", "hello", "--client-id", "resend-me"]) == 0
+    assert capsys.readouterr().out == "1\n"
+    assert main(["send", "hello", "--client-id", "resend-me"]) == 0
+    assert capsys.readouterr().out == "already delivered: message 1\n"
+    assert len(store.messages_after()) == 1

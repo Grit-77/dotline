@@ -8,6 +8,7 @@ param(
     [string[]]$Text,
     [string]$Topic = '',
     [string]$File,
+    [string]$ClientId,
     [int]$Id = 0,
     [double]$Minutes = 10,
     [int]$After = 0
@@ -49,6 +50,18 @@ function Invoke-Dotline([string]$Path, [string]$Body = $null) {
     } finally { $response.Dispose() }
 }
 
+# True when no HTTP answer arrived (connection, timeout, truncated read): the server may or may not
+# have stored the request. An HTTP error status is an answer and is never retried.
+function Test-NetworkError($ErrorRecord) {
+    $e = $ErrorRecord.Exception
+    while ($null -ne $e) {
+        if ($e -is [Net.WebException]) { return ($e.Status -ne [Net.WebExceptionStatus]::ProtocolError) }
+        if ($e -is [IO.IOException]) { return $true }
+        $e = $e.InnerException
+    }
+    return $false
+}
+
 try {
     $configHome = $env:DOTLINE_HOME
     if (!$configHome) {
@@ -82,8 +95,23 @@ try {
                 $message = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $File), $utf8)
             } else { $message = $Text -join ' ' }
             if (!$message -or $message.Length -gt 8000 -or $Topic.Length -gt 120) { throw 'Message or topic exceeds limits' }
-            $body = @{text = $message; topic = $Topic} | ConvertTo-Json -Compress
-            (Invoke-Dotline '/v1/messages' $body).id
+            if ($PSBoundParameters.ContainsKey('ClientId')) {
+                if ($ClientId.Length -lt 1 -or $ClientId.Length -gt 64) { throw 'client_id must contain 1 to 64 characters' }
+            } else { $ClientId = [guid]::NewGuid().ToString() }
+            $body = @{text = $message; topic = $Topic; client_id = $ClientId} | ConvertTo-Json -Compress
+            $result = $null
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+                try { $result = Invoke-Dotline '/v1/messages' $body; break }
+                catch {
+                    if (!(Test-NetworkError $_)) { throw }
+                    if ($attempt -eq 2) {
+                        [Console]::Error.WriteLine("dotline: request failed; the message may have arrived. Resend with the same client_id, never a new one: $ClientId")
+                        exit 1
+                    }
+                    Start-Sleep -Seconds 1
+                }
+            }
+            if ($result.duplicate -eq $true) { "already delivered: message $($result.id)" } else { $result.id }
         }
         wait {
             if ($Id -eq 0 -and $Text.Count -gt 0) { $Id = [int]$Text[0] }

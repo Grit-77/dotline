@@ -54,6 +54,33 @@ results and mailbox history can grow, and slow connections still consume
 threads. Put appropriate access limits at your tunnel or reverse proxy for a
 public deployment. Disk space and local file integrity remain operator duties.
 
+## Retries, client_id and duplicates
+
+`POST /v1/messages` accepts an optional `client_id` (1 to 64 characters; longer
+values get 400). The first POST with a client_id stores it on the message and
+answers 201. A later POST with the same client_id creates nothing and answers 200
+with the original `id` and `ts` and `"duplicate": true`. The lookup and the
+append run under the mailbox lock, so concurrent sends of one client_id leave one
+record.
+
+- **Reconcile rule.** After an ambiguous send (timeout, dropped connection,
+  server error, a client killed before it read the answer), resend with the SAME
+  client_id and never with a new one. A new client_id, or none, can create a
+  second message and so repeat a request that may change state.
+- **No exactly-once promise.** client_id deduplicates the creation of a message
+  only. dotline does not promise exactly-once delivery or handling: a claim
+  lapses after 30 minutes without a reply, and another session may then act on
+  the same message again. Keep handlers idempotent for anything that matters.
+- **It is not a secret and not authentication.** The client_id is stored in
+  plaintext in `inbox.jsonl` and returned by `GET /v1/messages`. Use a random
+  UUID4, never a token, password or personal data. Someone holding the bearer who
+  repeats a client_id learns only that message's `id` and `ts`, which the bearer
+  could already read.
+- **One client_id, one message.** The server ignores the text and topic of a
+  repeat, so reusing a client_id for a different message silently drops it. Reuse
+  one only to resend the same message. Generate a fresh UUID4 for every new send;
+  `dotline send` and both scripts already do.
+
 ## Reporting a vulnerability
 
 Use the repository's private vulnerability reporting feature if enabled. If it

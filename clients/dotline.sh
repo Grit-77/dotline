@@ -60,6 +60,32 @@ request() {
     response=$(< "$work/response")
 }
 
+# A fresh random (version 4) UUID for every send. Only od and tr are needed.
+new_client_id() {
+    local hex variant
+    hex=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    [[ ${#hex} -eq 32 ]] || die 'cannot generate a client_id'
+    printf -v variant '%x' $(( (0x${hex:16:1} & 3) | 8 ))
+    client_id=${hex:0:8}-${hex:8:4}-4${hex:13:3}-$variant${hex:17:3}-${hex:20:12}
+}
+
+# Send the prepared body; after a network error send it once more with the same client_id.
+# curl exits 22 when the server answered with an HTTP error: that is final, never retried.
+post_message() {
+    local attempt rc
+    for attempt in 1 2; do
+        rc=0
+        curl --silent --show-error --fail --max-time 15 --noproxy '*' \
+            --tlsv1.2 --header "@$work/header" --header 'Content-Type: application/json; charset=utf-8' \
+            --data-binary "@$work/body" "$url/v1/messages" > "$work/response" || rc=$?
+        ((rc != 0)) || break
+        ((rc != 22)) || die 'HTTP request failed'
+        ((attempt == 1)) || die "HTTP request failed; the message may have arrived. Resend with the same client_id, never a new one: $client_id"
+        sleep 1
+    done
+    response=$(< "$work/response")
+}
+
 json_string() {
     local value=$1 char i escaped
     printf '"'
@@ -146,13 +172,14 @@ find_reply() {
 
 command=${1:-}; [[ -n $command ]] || die 'usage: dotline.sh send|wait|replies|health [arguments]'
 shift
-topic='' file='' minutes=10 after=0 text='' message_id=''
+topic='' file='' minutes=10 after=0 text='' message_id='' client_id='' client_id_set=0
 while (($#)); do
     case "$1" in
-        --topic|--file|--minutes|--after)
+        --topic|--file|--minutes|--after|--client-id)
             (($# >= 2)) || die 'option needs a value'
             case "$1" in
                 --topic) topic=$2 ;; --file) file=$2 ;; --minutes) minutes=$2 ;; --after) after=$2 ;;
+                --client-id) client_id=$2; client_id_set=1 ;;
             esac
             shift 2 ;;
         *)
@@ -170,10 +197,25 @@ case "$command" in
             IFS= read -r -d '' text < "$file" || true
         fi
         [[ -n $text ]] || die 'message text is required'
-        { printf '{"text":'; json_string "$text"; printf ',"topic":'; json_string "$topic"; printf '}'; } > "$work/body"
-        request /v1/messages POST
+        if ((client_id_set)); then
+            ((${#client_id} >= 1 && ${#client_id} <= 64)) || die 'client_id must contain 1 to 64 characters'
+        else
+            new_client_id
+        fi
+        {
+            printf '{"text":'; json_string "$text"
+            printf ',"topic":'; json_string "$topic"
+            printf ',"client_id":'; json_string "$client_id"
+            printf '}'
+        } > "$work/body"
+        post_message
         [[ $response =~ \"id\"[[:space:]]*:[[:space:]]*([0-9]+) ]] || die 'invalid server response'
-        printf '%s\n' "${BASH_REMATCH[1]}" ;;
+        message_number=${BASH_REMATCH[1]}
+        if [[ $response =~ \"duplicate\"[[:space:]]*:[[:space:]]*true ]]; then
+            printf 'already delivered: message %s\n' "$message_number"
+        else
+            printf '%s\n' "$message_number"
+        fi ;;
     wait)
         [[ $message_id =~ ^[1-9][0-9]*$ && $minutes =~ ^[1-9][0-9]*$ ]] || die 'wait requires a positive id and whole minutes'
         deadline=$((SECONDS + minutes * 60))

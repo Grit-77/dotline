@@ -29,7 +29,7 @@ function Invoke-Dotline([string]$Path, [string]$Body = $null) {
     $request.Accept = 'application/json'
     if ($Path -ne '/v1/health') {
         $secret = [IO.File]::ReadAllText($script:tokenFile, $utf8).Trim()
-        if (!$secret -or $secret -match '[^\x21-\x7e]') { throw 'Invalid token file' }
+        if (!$secret -or $secret -cmatch '[^\x21-\x7e]') { throw 'Invalid token file' }
         $request.Headers['Authorization'] = 'Bearer ' + $secret
         $secret = $null
     }

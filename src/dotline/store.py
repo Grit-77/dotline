@@ -44,6 +44,10 @@ class Store:
             except FileExistsError:
                 if os.name != "nt":
                     path.chmod(0o600)
+            except PermissionError:
+                # Windows: another process is creating the same file at this moment (sharing violation).
+                if not path.exists():
+                    raise
 
     @contextmanager
     def locked(self):
@@ -52,9 +56,9 @@ class Store:
             if os.name == "nt":
                 import msvcrt
 
-                if not lock.read(1):
-                    lock.write(b"\0")
-                    lock.flush()
+                # Lock byte 0 without reading it first: while another process holds the lock, Windows
+                # refuses reads of that byte (PermissionError), and a region past the end of the file
+                # can be locked, so the file never needs content.
                 lock.seek(0)
                 # LK_NBLCK plus retry avoids msvcrt's ten-second lock limit.
                 while True:

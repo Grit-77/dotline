@@ -1,4 +1,4 @@
-![dotline — a direct line between two agents](docs/hero.png)
+![DOTLINE: a terminal session that sends, claims and answers a message, over a white card corridor. A tiny mailbox between two agents.](docs/hero.jpg)
 
 # dotline
 

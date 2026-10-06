@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- README FAQ: why a dot that drives a coding agent can read replies but never send
+  (the agent's safety review refuses a "read-only" task or an unknown destination),
+  and why a message should be sent from a file instead of a quoted shell string.
+
 ## 0.1.1 — 2026-09-30
 
 - Idempotent sends. `POST /v1/messages` accepts an optional `client_id` (1 to 64

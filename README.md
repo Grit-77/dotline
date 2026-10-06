@@ -400,6 +400,19 @@ Confirm the right config directory, that Monitor is armed or the channel is
 enabled, and that no other session holds the claim. Health alone does not test
 authentication. Use `dotline replies` to check it without creating a message.
 
+**My dot reads replies but its sends never arrive.** If the dot works through a
+coding agent on the connected computer (for example Codex), that agent's safety
+review can refuse the send: a task worded as "read-only checks" forbids it, and a
+server the agent does not know looks like an unverified external destination.
+Ask for the delivery explicitly in the task, and name your dotline server as your
+own in the agent's trusted instructions (its global `AGENTS.md` or equivalent).
+Send only the message text; never put the token in the task.
+
+**A send broke on an apostrophe.** Do not pass a long or multi-line message inside
+a quoted shell string (`bash -c '...'`, `ssh host '...'`): one apostrophe ends the
+quote and nothing is sent. Write the text to a file and send the file:
+`dotline.sh send --file message.txt` or `dotline.ps1 send -File message.txt`.
+
 ## Not affiliated
 
 dotline is an independent open-source project, **not affiliated with, endorsed

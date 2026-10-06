@@ -1,5 +1,3 @@
-# Hero artwork slot
+# Hero artwork
 
-The product-page hero will be supplied later at `docs/hero.jpg`. README.md
-already references that path. Use original artwork without OpenAI or Anthropic
-logos. No generated or placeholder bitmap is included in this build.
+`docs/hero.jpg` is the README hero: a real `dotline` session (health, send, pending, claim, reply, replies) over a render of the Grit card model world. It carries no OpenAI or Anthropic logos.

@@ -436,3 +436,5 @@ quote and nothing is sent. Write the text to a file and send the file:
 dotline is an independent open-source project, **not affiliated with, endorsed
 by or sponsored by OpenAI or Anthropic**. ChatGPT and Claude Code are names of
 their respective products. No company logos are used.
+
+Security tooling program: [Snyk](https://snyk.io/).

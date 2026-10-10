@@ -252,6 +252,40 @@ def test_powershell_wait_does_not_poll_after_sleeping_to_deadline(
     assert mailbox[0].token() not in result.stderr
 
 
+@pytest.mark.parametrize("wait_server", [0], indirect=True)
+def test_powershell_wait_resleeps_after_an_early_wake(
+    mailbox, wait_server, wait_powershell, tmp_path
+):
+    report = tmp_path / "sleeps.txt"
+    wrapper = tmp_path / "early-wake.ps1"
+    report_path = str(report).replace("'", "''")
+    client_path = str(CLIENTS / "dotline.ps1").replace("'", "''")
+    # Shadow only the OS sleep boundary. The real client, Stopwatch, and HTTP
+    # transport remain intact; its first sleep returns long before the schedule.
+    wrapper.write_text(
+        "$script:sleeps = 0\n"
+        "function Start-Sleep([int]$Milliseconds) {\n"
+        "    $script:sleeps++\n"
+        f"    Add-Content -LiteralPath '{report_path}' -Value $Milliseconds\n"
+        "    if ($script:sleeps -eq 1) { $Milliseconds = 1 }\n"
+        "    Microsoft.PowerShell.Utility\\Start-Sleep -Milliseconds $Milliseconds\n"
+        "}\n"
+        f"& '{client_path}' wait 7 -Minutes 0.03333333333333\n"
+        "exit $LASTEXITCODE\n",
+        encoding="utf-8-sig",
+    )
+    result = subprocess.run(
+        [wait_powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(wrapper)],
+        capture_output=True, text=True, encoding="utf-8", timeout=10,
+    )
+    assert result.returncode == 1, result.stdout
+    assert len(wait_server.polls) == 1
+    assert len(report.read_text(encoding="utf-8-sig").splitlines()) >= 2
+    assert result.stdout == ""
+    assert mailbox[0].token() not in result.stderr
+
+
 @pytest.mark.parametrize("wait_server", [(3, "headers"), (3, "body")], indirect=True)
 def test_powershell_wait_caps_transport_timeout_to_remaining_budget(
     mailbox, wait_server, wait_powershell

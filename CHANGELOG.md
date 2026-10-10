@@ -10,6 +10,8 @@
   intact and can be retried without a corrupt partial claim blocking delivery.
 - Stop `wait` polling at its deadline and cap request timeouts to the remaining
   polling budget in Python, PowerShell and Bash clients.
+- Keep PowerShell polls on schedule even if a sleep returns early, including
+  the final sleep up to the deadline.
 - Keep intact mailbox records readable after a write stops inside a UTF-8
   character, and allow later appends and idempotent retries to recover.
 - Preserve a watcher's unfinished startup line so a message completed after

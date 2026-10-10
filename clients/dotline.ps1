@@ -153,7 +153,12 @@ try {
                 if ($found) { break }
                 $remaining = $Minutes * 60 - $timer.Elapsed.TotalSeconds
                 if ($remaining -le 0) { throw 'Timed out waiting for a reply' }
-                Start-Sleep -Milliseconds ([int][Math]::Ceiling([Math]::Min(20, $remaining) * 1000))
+                $nextPollAt = [Math]::Min($Minutes * 60, $timer.Elapsed.TotalSeconds + 20)
+                while ($true) {
+                    $delay = $nextPollAt - $timer.Elapsed.TotalSeconds
+                    if ($delay -le 0) { break }
+                    Start-Sleep -Milliseconds ([int][Math]::Ceiling($delay * 1000))
+                }
             }
         }
         replies {

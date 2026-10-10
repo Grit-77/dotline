@@ -4,6 +4,7 @@ import queue
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 
 import pytest
 
@@ -23,6 +24,169 @@ class QueueOutput:
 
 def initialize(channel):
     channel.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}})
+
+
+@contextmanager
+def pushing(channel):
+    """Run the real push loop with bounded cleanup and observable failures."""
+    failures = []
+
+    def push():
+        try:
+            channel.push()
+        except Exception as error:
+            failures.append(error)
+
+    worker = threading.Thread(target=push, daemon=True)
+    worker.start()
+    try:
+        yield worker
+    finally:
+        channel.stop.set()
+        worker.join(timeout=1)
+        assert not worker.is_alive(), "channel worker did not stop"
+        assert not failures, failures
+
+
+@pytest.mark.parametrize("claimed_before_error", [False, True])
+def test_channel_retries_claim_without_losing_batch_or_repeating_notifications(
+    mailbox, monkeypatch, claimed_before_error,
+):
+    config, store = mailbox
+    store.send("Startup backlog")
+    output = QueueOutput()
+    channel = Channel(config, stdout=output)
+    store.send("First new event")
+    store.send("Second new event")
+    store.send("Third new event")
+    claim = channel.store.claim
+    failed = False
+
+    def transient_claim(message_id, owner):
+        nonlocal failed
+        if message_id == 3 and not failed:
+            failed = True
+            if claimed_before_error:
+                claim(message_id, owner)
+            raise OSError("temporary storage failure")
+        return claim(message_id, owner)
+
+    monkeypatch.setattr(channel.store, "claim", transient_claim)
+    with pushing(channel):
+        notifications = [output.lines.get(timeout=2) for _ in range(3)]
+        assert [item["params"]["meta"]["message_id"] for item in notifications] == ["2", "3", "4"]
+        store.send("Later arrival")
+        assert output.lines.get(timeout=2)["params"]["meta"]["message_id"] == "5"
+    assert output.lines.empty()
+    assert [item["claimed_by"] for item in store.pending()] == [
+        None, channel.owner, channel.owner, channel.owner, channel.owner,
+    ]
+
+
+def test_channel_recovers_after_transient_follower_poll_error(mailbox, monkeypatch):
+    config, store = mailbox
+    store.send("Startup backlog")
+    output = QueueOutput()
+    channel = Channel(config, stdout=output)
+    poll = channel.follower.poll
+    failed = False
+
+    def transient_poll():
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("temporary inbox read failure")
+        return poll()
+
+    monkeypatch.setattr(channel.follower, "poll", transient_poll)
+    store.send("New event")
+    with pushing(channel):
+        assert output.lines.get(timeout=2)["params"]["meta"]["message_id"] == "2"
+        store.send("Later arrival")
+        assert output.lines.get(timeout=2)["params"]["meta"]["message_id"] == "3"
+    assert output.lines.empty()
+
+
+@pytest.mark.parametrize("operation", ["poll", "claim"])
+def test_channel_stop_interrupts_persistent_storage_retry(mailbox, monkeypatch, operation):
+    config, store = mailbox
+    output = QueueOutput()
+    channel = Channel(config, stdout=output)
+    store.send("New event")
+    failed = threading.Event()
+
+    def unavailable(*args):
+        failed.set()
+        raise OSError("storage unavailable")
+
+    target = channel.follower if operation == "poll" else channel.store
+    monkeypatch.setattr(target, operation, unavailable)
+    with pushing(channel) as worker:
+        assert failed.wait(timeout=1)
+        channel.stop.set()
+        worker.join(timeout=0.5)
+        assert not worker.is_alive()
+    assert output.lines.empty()
+
+
+@pytest.mark.parametrize("operation", ["write", "flush"])
+def test_channel_output_failure_stops_without_replaying_side_effects(mailbox, operation):
+    config, store = mailbox
+
+    class FailingOutput(QueueOutput):
+        def write(self, value):
+            super().write(value)
+            if operation == "write":
+                raise BrokenPipeError("output closed")
+
+        def flush(self):
+            if operation == "flush":
+                raise BrokenPipeError("output closed")
+
+    output = FailingOutput()
+    channel = Channel(config, stdout=output)
+    store.send("First event")
+    store.send("Second event")
+    channel.push()
+    assert channel.stop.is_set()
+    assert output.lines.get_nowait()["params"]["meta"]["message_id"] == "1"
+    assert output.lines.empty()
+    assert [item["claimed_by"] for item in store.pending()] == [channel.owner, None]
+
+
+def test_channel_stop_prevents_remaining_batch_notifications(mailbox):
+    config, store = mailbox
+
+    class StoppingOutput(QueueOutput):
+        def write(self, value):
+            super().write(value)
+            channel.stop.set()
+
+    output = StoppingOutput()
+    channel = Channel(config, stdout=output)
+    store.send("First event")
+    store.send("Second event")
+    channel.push()
+    assert output.lines.get_nowait()["params"]["meta"]["message_id"] == "1"
+    assert output.lines.empty()
+    assert [item["claimed_by"] for item in store.pending()] == [channel.owner, None]
+
+
+def test_channel_skips_conflicted_claim_and_delivers_remaining_batch(mailbox):
+    config, store = mailbox
+    output = QueueOutput()
+    channel = Channel(config, stdout=output)
+    store.send("First event")
+    store.send("Held event")
+    store.send("Third event")
+    store.claim(2, "other-session")
+    with pushing(channel):
+        notifications = [output.lines.get(timeout=2) for _ in range(2)]
+        assert [item["params"]["meta"]["message_id"] for item in notifications] == ["1", "3"]
+    assert output.lines.empty()
+    assert [item["claimed_by"] for item in store.pending()] == [
+        channel.owner, "other-session", channel.owner,
+    ]
 
 
 def test_channel_initialize_has_capability_and_policy(mailbox):

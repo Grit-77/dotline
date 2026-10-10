@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Keep the channel's delivery loop alive after transient mailbox read or claim
+  errors, preserving unread messages and the current notification batch.
+- Validate stored claim owners and timestamps before evaluating expiry, so
+  malformed claims cannot be silently replaced or escape as unexpected errors.
+- Publish complete claim files atomically; failed writes leave existing claims
+  intact and can be retried without a corrupt partial claim blocking delivery.
+- Stop `wait` polling at its deadline and cap request timeouts to the remaining
+  polling budget in Python, PowerShell and Bash clients.
 - Keep intact mailbox records readable after a write stops inside a UTF-8
   character, and allow later appends and idempotent retries to recover.
 - Preserve a watcher's unfinished startup line so a message completed after

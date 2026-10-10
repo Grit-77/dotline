@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -146,6 +147,130 @@ def test_shell_wait_selects_correct_reply_and_decodes_text(fake_curl, monkeypatc
     result = shell("wait", "7")
     assert result.returncode == 0, result.stderr
     assert result.stdout == text + "\n"
+
+
+def bash_executable():
+    if os.name == "nt":
+        executable = Path("C:/Program Files/Git/bin/bash.exe")
+        if executable.exists():
+            return str(executable)
+    else:
+        executable = shutil.which("bash")
+        if executable:
+            return executable
+    pytest.skip("bash is unavailable")
+
+
+def test_shell_wait_caps_transport_timeout_and_stops_at_deadline(mailbox, tmp_path, monkeypatch):
+    monkeypatch.setenv("DOTLINE_TOKEN_FILE", mailbox[0].token_path.as_posix())
+    report = tmp_path / "polls.txt"
+    # Functions run in the client's shell, so they advance its real SECONDS clock
+    # without waiting a minute or replacing any of the client's polling logic.
+    harness = r'''
+        curl() {
+            while (($#)); do
+                if [[ $1 == --max-time ]]; then printf '%s\n' "$2" >> "$report"; fi
+                shift
+            done
+            SECONDS=$((SECONDS + 3))
+            printf '%s\n' '{"replies":[]}'
+        }
+        sleep() { SECONDS=$((SECONDS + $1)); }
+        report=$2
+        source "$1" wait 7 --minutes 1
+    '''
+    result = subprocess.run(
+        [bash_executable(), "-c", harness, "wait-test", (CLIENTS / "dotline.sh").as_posix(),
+         report.as_posix()], capture_output=True, text=True, encoding="utf-8", timeout=5,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "timed out" in result.stderr
+    assert report.read_text().splitlines() == ["15", "15", "14"]
+    assert result.stdout == ""
+
+
+@pytest.fixture
+def wait_server(monkeypatch, request):
+    delay, stage = request.param if isinstance(request.param, tuple) else (request.param, "headers")
+
+    class Handler(BaseHTTPRequestHandler):
+        def handle(self):
+            try:
+                super().handle()
+            except (ConnectionResetError, ConnectionAbortedError):
+                pass
+
+        def do_GET(self):
+            self.server.polls.append(self.path)
+            if stage == "headers":
+                time.sleep(delay)
+            replies = [] if delay == 0 and len(self.server.polls) == 1 else [
+                {"id": 1, "to": 7, "text": "Finished"}
+            ]
+            body = json.dumps({"replies": replies}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                if stage == "body":
+                    time.sleep(delay)
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server.polls = []
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("DOTLINE_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture(params=["pwsh", "powershell"])
+def wait_powershell(request):
+    executable = shutil.which(request.param)
+    if os.name != "nt" or executable is None:
+        pytest.skip(f"{request.param} is unavailable on Windows")
+    return executable
+
+
+@pytest.mark.parametrize("wait_server", [0], indirect=True)
+def test_powershell_wait_does_not_poll_after_sleeping_to_deadline(
+    mailbox, wait_server, wait_powershell
+):
+    result = powershell("wait", "7", "-Minutes", "0.03333333333333", executable=wait_powershell)
+    assert result.returncode == 1, result.stdout
+    assert len(wait_server.polls) == 1
+    assert result.stdout == ""
+    assert mailbox[0].token() not in result.stderr
+
+
+@pytest.mark.parametrize("wait_server", [(3, "headers"), (3, "body")], indirect=True)
+def test_powershell_wait_caps_transport_timeout_to_remaining_budget(
+    mailbox, wait_server, wait_powershell
+):
+    result = powershell("wait", "7", "-Minutes", "0.03333333333333", executable=wait_powershell)
+    assert result.returncode == 1, result.stdout
+    assert len(wait_server.polls) == 1
+    assert result.stdout == ""
+    assert mailbox[0].token() not in result.stderr
+
+
+@pytest.mark.parametrize("wait_server", [0.001], indirect=True)
+@pytest.mark.parametrize("minutes", ["NaN", "Infinity", "-Infinity"])
+def test_powershell_wait_rejects_nonfinite_minutes_before_polling(
+    mailbox, wait_server, minutes, wait_powershell
+):
+    result = powershell("wait", "7", "-Minutes", minutes, executable=wait_powershell)
+    assert result.returncode == 1, result.stdout
+    assert wait_server.polls == []
 
 
 @pytest.mark.parametrize("command", ["health", "replies"])

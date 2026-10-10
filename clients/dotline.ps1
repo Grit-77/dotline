@@ -20,12 +20,12 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 
-function Invoke-Dotline([string]$Path, [string]$Body = $null) {
+function Invoke-Dotline([string]$Path, [string]$Body = $null, [int]$TimeoutMs = 15000) {
     $request = [Net.HttpWebRequest]::Create($script:baseUrl + $Path)
     $request.AllowAutoRedirect = $false
     $request.Proxy = $null
-    $request.Timeout = 15000
-    $request.ReadWriteTimeout = 15000
+    $request.Timeout = $TimeoutMs
+    $request.ReadWriteTimeout = $TimeoutMs
     $request.Accept = 'application/json'
     if ($Path -ne '/v1/health') {
         $secret = [IO.File]::ReadAllText($script:tokenFile, $utf8).Trim()
@@ -137,11 +137,14 @@ try {
         }
         wait {
             if ($Id -eq 0 -and $Text.Count -gt 0) { $Id = [int]$Text[0] }
-            if ($Id -lt 1 -or $Minutes -le 0 -or $Minutes -gt 10080) { throw 'Invalid id or minutes' }
+            if ($Id -lt 1 -or [double]::IsNaN($Minutes) -or [double]::IsInfinity($Minutes) -or $Minutes -le 0 -or $Minutes -gt 10080) { throw 'Invalid id or minutes' }
             $timer = [Diagnostics.Stopwatch]::StartNew()
             $cursor = 0
             while ($true) {
-                $result = Invoke-Dotline ("/v1/replies?after=" + $cursor)
+                $remaining = $Minutes * 60 - $timer.Elapsed.TotalSeconds
+                if ($remaining -le 0) { throw 'Timed out waiting for a reply' }
+                $timeoutMs = [int][Math]::Max(1, [Math]::Floor([Math]::Min(15, $remaining) * 1000))
+                $result = Invoke-Dotline ("/v1/replies?after=" + $cursor) -TimeoutMs $timeoutMs
                 $found = $false
                 foreach ($reply in $result.replies) {
                     if ($reply.to -eq $Id) { $reply.text; $found = $true; break }
@@ -150,7 +153,7 @@ try {
                 if ($found) { break }
                 $remaining = $Minutes * 60 - $timer.Elapsed.TotalSeconds
                 if ($remaining -le 0) { throw 'Timed out waiting for a reply' }
-                Start-Sleep -Milliseconds ([int]([Math]::Min(20, $remaining) * 1000))
+                Start-Sleep -Milliseconds ([int][Math]::Ceiling([Math]::Min(20, $remaining) * 1000))
             }
         }
         replies {

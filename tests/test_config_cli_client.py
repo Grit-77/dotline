@@ -138,7 +138,7 @@ def test_wait_polls_every_twenty_seconds_without_sockets(mailbox, monkeypatch):
     now = [0.0]
     slept = []
     responses = [[], [], [{"id": 1, "to": 7, "text": "Finished"}]]
-    monkeypatch.setattr(client, "replies", lambda after: responses.pop(0))
+    monkeypatch.setattr(client, "replies", lambda after, **kwargs: responses.pop(0))
 
     def sleep(seconds):
         slept.append(seconds)
@@ -151,10 +151,59 @@ def test_wait_polls_every_twenty_seconds_without_sockets(mailbox, monkeypatch):
 def test_wait_timeout_does_not_sleep_past_deadline(mailbox, monkeypatch):
     client = Client(mailbox[0])
     now = [0.0]
-    monkeypatch.setattr(client, "replies", lambda after: [])
+    monkeypatch.setattr(client, "replies", lambda after, **kwargs: [])
     with pytest.raises(ClientError, match="timed out"):
         client.wait(1, 0.1, clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
     assert now[0] == 6
+
+
+@pytest.mark.parametrize("minutes,expected_timeouts", [(0.1, [6]), (1, [15, 15, 14])])
+def test_wait_caps_transport_timeout_and_stops_polling_at_deadline(
+    mailbox, minutes, expected_timeouts
+):
+    client = Client(mailbox[0])
+    now = [0.0]
+    polls = []
+
+    class EmptyOpener:
+        def open(self, request, timeout):
+            polls.append((request.full_url, timeout))
+            now[0] += 3
+            return io.BytesIO(b'{"replies":[]}')
+
+    client.opener = EmptyOpener()
+    with pytest.raises(ClientError, match="timed out"):
+        client.wait(
+            7, minutes, clock=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+    assert [timeout for _, timeout in polls] == expected_timeouts
+    assert now[0] == minutes * 60
+
+
+def test_wait_accepts_an_immediate_matching_reply_with_short_budget(mailbox):
+    client = Client(mailbox[0])
+
+    class ReplyOpener:
+        def open(self, request, timeout):
+            assert 0 < timeout <= 0.06
+            return io.BytesIO(b'{"replies":[{"id":1,"to":7,"text":"Finished"}]}')
+
+    client.opener = ReplyOpener()
+    assert client.wait(7, 0.001, clock=lambda: 0)["text"] == "Finished"
+
+
+@pytest.mark.parametrize("minutes", [float("nan"), float("inf"), -float("inf")])
+def test_wait_rejects_nonfinite_minutes_before_polling(mailbox, minutes):
+    client = Client(mailbox[0])
+
+    class UnexpectedOpener:
+        def open(self, request, timeout):
+            pytest.fail("invalid wait budget must not poll")
+
+    client.opener = UnexpectedOpener()
+    with pytest.raises(ClientError, match="minutes"):
+        client.wait(7, minutes)
 
 
 def test_redirects_are_not_followed_and_errors_never_echo_bearer(mailbox, capsys):

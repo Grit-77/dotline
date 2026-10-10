@@ -36,6 +36,237 @@ def test_claim_lapses_after_30_minutes(mailbox, monkeypatch):
     assert store.pending()[0]["claimed_by"] == "two"
 
 
+@pytest.mark.parametrize("operation", ["claim", "reply", "reply_by", "pending"])
+@pytest.mark.parametrize(
+    "damaged",
+    [
+        b'{"by": "original", "at": NaN}',
+        b'{"by": "original", "at": Infinity}',
+        b'{"by": "original", "at": -Infinity}',
+        b'{"by": "original", "at": 1e400}',
+        ('{"by": "original", "at": ' + "9" * 400 + "}").encode(),
+        b'{"by": "original", "at": -1}',
+        b'{"by": "original", "at": true}',
+        b'{"by": "original", "at": false}',
+        b'{"by": "original", "at": "2000000000"}',
+        b'{"by": "original", "at": null}',
+        b'{"by": "original", "at": []}',
+        b'{"by": "original", "at": {}}',
+        b'{"by": "original"}',
+        b'{"at": 2000000000}',
+        b'{"at": 0}',
+        b'{"by": null, "at": 2000000000}',
+        b'{"by": false, "at": 2000000000}',
+        b'{"by": 7, "at": 2000000000}',
+        b'{"by": [], "at": 2000000000}',
+        b'{"by": {}, "at": 2000000000}',
+        b'{"by": "", "at": 2000000000}',
+        b'{"by": "", "at": 0}',
+        ('{"by": "' + "x" * 201 + '", "at": 2000000000}').encode(),
+        ('{"by": "' + "x" * 201 + '", "at": 0}').encode(),
+        b"{}",
+        b"[]",
+        b'["original", 2000000000]',
+        b'"original"',
+        b"42",
+        b"true",
+        b"null",
+        b'{"by": "original",',
+        b'{"by": "\xff", "at": 2000000000}',
+        b"[" * 20000 + b"0" + b"]" * 20000,
+    ],
+    ids=[
+        "nan", "infinity", "negative_infinity", "overflow_float", "huge_integer",
+        "negative_time", "true_time", "false_time", "string_time", "null_time",
+        "list_time", "object_time", "missing_time", "missing_holder",
+        "expired_missing_holder", "null_holder", "bool_holder", "number_holder",
+        "list_holder", "object_holder", "empty_holder", "expired_empty_holder",
+        "long_holder", "expired_long_holder", "empty_object", "empty_list", "list",
+        "string", "number", "bool", "null", "torn_json", "invalid_utf8", "deep_json",
+    ],
+)
+def test_corrupt_claim_is_refused_without_mutating_mailbox(
+    mailbox, monkeypatch, operation, damaged,
+):
+    _, store = mailbox
+    monkeypatch.setattr("dotline.store.time.time", lambda: 2000000000)
+    store.send("Unanswered question")
+    claim_path = store.claims / "1"
+    claim_path.write_bytes(damaged)
+    inbox_before = store.inbox.read_bytes()
+    replies_before = store.replies.read_bytes()
+
+    with pytest.raises(ValueError) as caught:
+        if operation == "claim":
+            store.claim(1, "original")
+        elif operation == "reply":
+            store.reply(1, "Answer")
+        elif operation == "reply_by":
+            store.reply(1, "Answer", session="original")
+        else:
+            store.pending()
+
+    assert type(caught.value) is ValueError
+    assert str(caught.value) == "claim file is invalid"
+    assert claim_path.read_bytes() == damaged
+    assert store.inbox.read_bytes() == inbox_before
+    assert store.replies.read_bytes() == replies_before
+
+
+@pytest.mark.parametrize("holder", ["legacy", "x" * 200, "\u00e7\U0001f600", " "])
+@pytest.mark.parametrize("at", [2000000000, 1999999999.5, 2000000001.0])
+def test_valid_legacy_claim_keeps_holder_and_same_session_does_not_renew(
+    mailbox, monkeypatch, holder, at,
+):
+    _, store = mailbox
+    monkeypatch.setattr("dotline.store.time.time", lambda: 2000000000)
+    store.send("Question")
+    claim_path = store.claims / "1"
+    stored = json.dumps({"by": holder, "at": at, "legacy": True}).encode()
+    claim_path.write_bytes(stored)
+
+    store.claim(1, holder)
+    assert claim_path.read_bytes() == stored
+    assert store.pending()[0]["claimed_by"] == holder
+    with pytest.raises(ClaimConflict):
+        store.claim(1, "another session")
+    assert store.reply(1, "Answer", session=holder)["to"] == 1
+
+
+@pytest.mark.parametrize("at", [0, 0.0, 1999998200])
+def test_valid_expired_legacy_claim_can_be_replaced(mailbox, monkeypatch, at):
+    _, store = mailbox
+    monkeypatch.setattr("dotline.store.time.time", lambda: 2000000000)
+    store.send("Question")
+    (store.claims / "1").write_text(json.dumps({"by": "legacy", "at": at}), encoding="utf-8")
+
+    assert store.pending()[0]["claimed_by"] is None
+    store.claim(1, "new session")
+    assert store.pending()[0]["claimed_by"] == "new session"
+    assert store.reply(1, "Answer", session="new session")["to"] == 1
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_claim_partial_write_failure_preserves_target_and_retry_succeeds(
+    mailbox, monkeypatch, expired,
+):
+    _, store = mailbox
+    monkeypatch.setattr("dotline.store.time.time", lambda: 2000000000)
+    store.send("Question")
+    target = store.claims / "1"
+    old_claim = b'{"by": "old session", "at": 0}'
+    if expired:
+        target.write_bytes(old_claim)
+    unrelated = store.claims / ".unrelated.tmp"
+    unrelated.write_bytes(b"another attempt's file")
+    expected_names = {unrelated.name, "1"} if expired else {unrelated.name}
+    original_fdopen = os.fdopen
+    failed = False
+
+    class PartialWrite:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, data):
+            nonlocal failed
+            if not failed and data.startswith(b'{"by":'):
+                failed = True
+                if os.name != "nt":
+                    assert os.fstat(self.stream.fileno()).st_mode & 0o777 == 0o600
+                self.stream.write(data[:10])
+                self.stream.flush()
+                raise OSError("interrupted claim write")
+            return self.stream.write(data)
+
+    monkeypatch.setattr("dotline.store.os.fdopen", lambda *args, **kwargs: PartialWrite(
+        original_fdopen(*args, **kwargs),
+    ))
+    with pytest.raises(OSError, match="interrupted claim write"):
+        store.claim(1, "new session")
+
+    assert {path.name for path in store.claims.iterdir()} == expected_names
+    if expired:
+        assert target.read_bytes() == old_claim
+    else:
+        assert not target.exists()
+    assert store.pending()[0]["claimed_by"] is None
+    store.claim(1, "new session")
+    assert store.pending()[0]["claimed_by"] == "new session"
+    assert {path.name for path in store.claims.iterdir()} == {unrelated.name, "1"}
+    assert unrelated.read_bytes() == b"another attempt's file"
+
+
+def test_claim_failed_replace_preserves_expired_claim_and_retry_succeeds(mailbox, monkeypatch):
+    _, store = mailbox
+    monkeypatch.setattr("dotline.store.time.time", lambda: 2000000000)
+    store.send("Question")
+    target = store.claims / "1"
+    old_claim = b'{"by": "old session", "at": 0}'
+    target.write_bytes(old_claim)
+    original_replace = os.replace
+    failed = False
+
+    def fail_once(source, destination):
+        nonlocal failed
+        assert destination == target
+        assert source.parent == store.claims
+        assert json.loads(source.read_bytes()) == {"by": "new session", "at": 2000000000}
+        if os.name != "nt":
+            assert source.stat().st_mode & 0o777 == 0o600
+        if not failed:
+            failed = True
+            raise OSError("claim replacement failed")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("dotline.store.os.replace", fail_once)
+    with pytest.raises(OSError, match="claim replacement failed"):
+        store.claim(1, "new session")
+
+    assert target.read_bytes() == old_claim
+    assert {path.name for path in store.claims.iterdir()} == {"1"}
+    store.claim(1, "new session")
+    assert store.pending()[0]["claimed_by"] == "new session"
+    assert {path.name for path in store.claims.iterdir()} == {"1"}
+
+
+def test_claim_fsync_failure_preserves_expired_claim_and_retry_succeeds(mailbox, monkeypatch):
+    _, store = mailbox
+    monkeypatch.setattr("dotline.store.time.time", lambda: 2000000000)
+    store.send("Question")
+    target = store.claims / "1"
+    old_claim = b'{"by": "old session", "at": 0}'
+    target.write_bytes(old_claim)
+    original_fsync = os.fsync
+    failed = False
+
+    def fail_once(fd):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("claim synchronization failed")
+        return original_fsync(fd)
+
+    monkeypatch.setattr("dotline.store.os.fsync", fail_once)
+    with pytest.raises(OSError, match="claim synchronization failed"):
+        store.claim(1, "new session")
+
+    assert target.read_bytes() == old_claim
+    assert {path.name for path in store.claims.iterdir()} == {"1"}
+    store.claim(1, "new session")
+    assert store.pending()[0]["claimed_by"] == "new session"
+    assert {path.name for path in store.claims.iterdir()} == {"1"}
+
+
 def test_answered_cannot_be_claimed_or_replied_again(mailbox):
     _, store = mailbox
     store.send("Question")
@@ -117,6 +348,45 @@ def test_watch_survives_rewrite_without_observing_empty_file(mailbox):
     rewritten = {"id": 2, "text": "B" * 200, "topic": "", "ts": "now"}
     store.inbox.write_text(json.dumps(rewritten) + "\n", encoding="utf-8")
     assert follower.poll() == [rewritten]
+
+
+@pytest.mark.parametrize("change", ["append", "rewrite"])
+def test_watch_retry_after_late_read_error_preserves_cursor_and_unread_lines(
+    mailbox, monkeypatch, change,
+):
+    _, store = mailbox
+    store.send("Already observed")
+    partial = b'{"id": 2, "text": "unfinished"'
+    with store.inbox.open("ab") as stream:
+        stream.write(partial)
+    follower = Follower(store.inbox)
+    before = (follower.offset, follower.identity, follower.anchor, follower.partial)
+    if change == "append":
+        with store.inbox.open("ab") as stream:
+            stream.write(b'}\n')
+        expected = {"id": 2, "text": "unfinished"}
+    else:
+        store.inbox.write_bytes(b'{"id": 3, "text": "rewritten"}\n')
+        expected = {"id": 3, "text": "rewritten"}
+
+    original_anchor = follower._anchor
+    failed = False
+
+    def fail_late_once(stream, offset=None):
+        nonlocal failed
+        if not failed and stream.tell() == store.inbox.stat().st_size:
+            failed = True
+            raise OSError("transient anchor read failure")
+        if offset is None:
+            return original_anchor(stream)
+        return original_anchor(stream, offset)
+
+    monkeypatch.setattr(follower, "_anchor", fail_late_once)
+    with pytest.raises(OSError, match="transient anchor read failure"):
+        follower.poll()
+    assert (follower.offset, follower.identity, follower.anchor, follower.partial) == before
+    assert follower.poll() == [expected]
+    assert follower.poll() == []
 
 
 def test_watch_buffers_partial_lines_and_file_replacement(mailbox):

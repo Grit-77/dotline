@@ -52,16 +52,16 @@ make_header() {
 }
 
 request() {
-    local path=$1 method=${2:-GET}
+    local path=$1 method=${2:-GET} timeout=${3:-15}
     if [[ $path == /v1/health ]]; then
-        curl --silent --show-error --fail --max-time 15 --noproxy '*' \
+        curl --silent --show-error --fail --max-time "$timeout" --noproxy '*' \
             --tlsv1.2 "$url$path" > "$work/response" || die 'HTTP request failed'
     elif [[ $method == POST ]]; then
-        curl --silent --show-error --fail --max-time 15 --noproxy '*' \
+        curl --silent --show-error --fail --max-time "$timeout" --noproxy '*' \
             --tlsv1.2 --header "@$work/header" --header 'Content-Type: application/json; charset=utf-8' \
             --data-binary "@$work/body" "$url$path" > "$work/response" || die 'HTTP request failed'
     else
-        curl --silent --show-error --fail --max-time 15 --noproxy '*' \
+        curl --silent --show-error --fail --max-time "$timeout" --noproxy '*' \
             --tlsv1.2 --header "@$work/header" "$url$path" > "$work/response" || die 'HTTP request failed'
     fi
     response=$(< "$work/response")
@@ -274,7 +274,11 @@ case "$command" in
         [[ $message_id =~ ^[1-9][0-9]*$ && $minutes =~ ^[1-9][0-9]*$ ]] || die 'wait requires a positive id and whole minutes'
         deadline=$((SECONDS + minutes * 60))
         while :; do
-            request /v1/replies?after=0
+            remaining=$((deadline - SECONDS))
+            ((remaining > 0)) || die 'timed out waiting for a reply'
+            timeout=15
+            ((remaining >= timeout)) || timeout=$remaining
+            request /v1/replies?after=0 GET "$timeout"
             find_reply
             if ((found)); then printf '%s\n' "$reply_text"; break; fi
             ((SECONDS < deadline)) || die 'timed out waiting for a reply'

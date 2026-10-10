@@ -169,6 +169,11 @@ $env:DOTLINE_TOKEN_FILE = 'C:\private\dotline\token'
 Shell `wait` accepts whole minutes; the Python and PowerShell clients also
 accept fractional minutes. Configuration URLs should be simple quoted origins.
 
+`wait` polls immediately, then sleeps up to 20 seconds between polls. It stops
+starting new polls when its deadline is reached and limits each request's
+network timeout to the remaining time. Network stack delays or a slowly
+streaming response can still extend total runtime beyond that deadline.
+
 ## Claude side
 
 ### Desktop or any session with Monitor: hook + watch
@@ -219,6 +224,11 @@ one `reply` tool with `message_id` and `text`. Metadata values are strings. It
 automatically claims each event before delivery so several sessions do not
 handle the same request. Logs go to stderr, never the protocol stream.
 
+Temporary mailbox read or claim errors are retried while the channel stays
+open. Messages from the current batch remain queued, and successful
+notifications are not repeated by these retries. A closed output stream stops
+delivery; after restarting, check `dotline pending` for unanswered messages.
+
 Flags: `--serve` runs HTTP in the same process; `--host` defaults to
 `127.0.0.1`; `--port` overrides the config's port (initially `8790`). Without
 `--serve`, run a separate `dotline serve`. Only one process can bind a port.
@@ -257,10 +267,16 @@ See [SECURITY.md](SECURITY.md) for the threat model and disclosure guidance.
 
 ## Several sessions
 
-Claims use exclusive file creation and a process lock. The same session may
+Claims use a process lock and atomic file replacement. The same session may
 claim again; another receives exit 3. A claim without a reply lapses after
 30 minutes. Answered messages cannot be claimed or answered again. `pending`
 shows the current holder, including channel sessions.
+
+Claim updates are written to a private temporary file and published atomically
+under the mailbox lock, so an interrupted write does not replace a valid claim.
+A malformed claim file is refused before checking its expiry. Commands report
+an invalid claim instead of replacing it or treating it as unclaimed. Inspect
+and repair the file with the sessions stopped before trying again.
 
 For Monitor, always claim before working. Optionally use
 `dotline reply <id> --by <session_id> "answer"` to require the matching claim.

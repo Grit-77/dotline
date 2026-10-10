@@ -32,7 +32,9 @@ class Client:
         # Ignore ambient proxy settings: the bearer must go only to the configured origin.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def request(self, path: str, body: dict | None = None, *, auth: bool = True) -> dict:
+    def request(
+        self, path: str, body: dict | None = None, *, auth: bool = True, timeout: float = 15
+    ) -> dict:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
         if data is not None and not 1 <= len(data) <= 16384:
             raise ClientError("encoded body must contain 1 to 16384 bytes")
@@ -43,7 +45,8 @@ class Client:
             headers["Content-Type"] = "application/json; charset=utf-8"
         request = urllib.request.Request(self.config.client_url + path, data=data, headers=headers)
         try:
-            with self.opener.open(request, timeout=15) as response:
+            # urllib's timeout bounds socket operations, not the whole response transaction.
+            with self.opener.open(request, timeout=timeout) as response:
                 result = json.load(response)
         except urllib.error.HTTPError as error:
             raise ClientError(f"HTTP {error.code}; check the URL, token file and request limits") from None
@@ -87,10 +90,10 @@ class Client:
                     f"Resend with the same client_id, never a new one: {client_id}"
                 ) from None
 
-    def replies(self, after: int = 0) -> list[dict]:
+    def replies(self, after: int = 0, *, timeout: float = 15) -> list[dict]:
         if after < 0:
             raise ClientError("after must be nonnegative")
-        return self.request(f"/v1/replies?after={after}")["replies"]
+        return self.request(f"/v1/replies?after={after}", timeout=timeout)["replies"]
 
     def wait(self, message_id: int, minutes: float = 10, *, clock=time.monotonic, sleep=time.sleep) -> dict:
         if message_id < 1 or not 0 < minutes <= 10080:
@@ -98,7 +101,10 @@ class Client:
         deadline = clock() + minutes * 60
         after = 0
         while True:
-            replies = self.replies(after)
+            remaining = deadline - clock()
+            if remaining <= 0:
+                raise ClientError("timed out waiting for a reply")
+            replies = self.replies(after, timeout=min(15, remaining))
             for reply in replies:
                 if reply["to"] == message_id:
                     return reply

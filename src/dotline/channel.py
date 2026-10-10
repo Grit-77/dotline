@@ -54,18 +54,43 @@ class Channel:
         self.write({"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": message}})
 
     def push(self) -> None:
-        for message in self.follower.follow(self.stop):
+        # Retain one polled batch until each claim succeeds or is refused. A
+        # failed claim must not discard the other records behind its cursor.
+        while not self.stop.is_set():
             try:
-                self.store.claim(message["id"], self.owner)
-            except (ClaimConflict, ValueError):
+                batch = self.follower.poll()
+            except OSError:
+                self.stop.wait(0.1)
                 continue
-            self.write({
-                "jsonrpc": "2.0", "method": "notifications/claude/channel",
-                "params": {
-                    "content": message["text"],
-                    "meta": {"message_id": str(message["id"]), "topic": str(message.get("topic", ""))},
-                },
-            })
+            for message in batch:
+                while not self.stop.is_set():
+                    try:
+                        self.store.claim(message["id"], self.owner)
+                    except (ClaimConflict, ValueError):
+                        # A held, answered or invalid message is not retryable.
+                        break
+                    except OSError:
+                        self.stop.wait(0.1)
+                        continue
+                    if self.stop.is_set():
+                        return
+                    try:
+                        self.write({
+                            "jsonrpc": "2.0", "method": "notifications/claude/channel",
+                            "params": {
+                                "content": message["text"],
+                                "meta": {"message_id": str(message["id"]), "topic": str(message.get("topic", ""))},
+                            },
+                        })
+                    except OSError:
+                        # A write or flush may already have delivered bytes.
+                        # Stop this channel rather than replaying that effect.
+                        self.stop.set()
+                        return
+                    break
+                if self.stop.is_set():
+                    return
+            self.stop.wait(0.1)
 
     def handle(self, message) -> None:
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):

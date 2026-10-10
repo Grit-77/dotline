@@ -1,7 +1,9 @@
 """JSONL mailbox, process locks and exclusive, expiring claims."""
 
 import json
+import math
 import os
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -171,11 +173,20 @@ class Store:
         path = self.claims / str(message_id)
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(record, dict)
+                or not isinstance(record.get("by"), str)
+                or not 1 <= len(record["by"]) <= 200
+                or type(record.get("at")) not in (int, float)
+                or not math.isfinite(record["at"])
+                or record["at"] < 0
+            ):
+                raise ValueError("claim file is invalid")
             if time.time() - record["at"] < CLAIM_SECONDS:
                 return record
         except FileNotFoundError:
             pass
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, OverflowError, RecursionError):
             # Fail closed on a corrupt claim instead of silently stealing it.
             raise ValueError("claim file is invalid") from None
         return None
@@ -191,10 +202,20 @@ class Store:
                     raise ClaimConflict("message is held by another session")
                 return
             path = self.claims / str(message_id)
-            path.unlink(missing_ok=True)
-            private_write(
-                path, json.dumps({"by": session, "at": time.time()}).encode(), exclusive=True
-            )
+            data = json.dumps({"by": session, "at": time.time()}).encode()
+            fd, name = tempfile.mkstemp(prefix=f".{message_id}-", suffix=".tmp", dir=self.claims)
+            staged = Path(name)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    if os.name != "nt":
+                        os.fchmod(stream.fileno(), 0o600)
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                # Keep an expired claim intact until a complete replacement is ready.
+                os.replace(staged, path)
+            finally:
+                staged.unlink(missing_ok=True)
 
     def reply(self, message_id: int, text: str, *, session: str | None = None) -> dict:
         validate_text(text)
@@ -256,32 +277,35 @@ class Follower:
     def _identity(stat):
         return stat.st_dev, stat.st_ino
 
-    def _anchor(self, stream) -> bytes:
-        start = max(0, self.offset - 128)
+    def _anchor(self, stream, offset: int | None = None) -> bytes:
+        if offset is None:
+            offset = self.offset
+        start = max(0, offset - 128)
         stream.seek(start)
-        return stream.read(self.offset - start)
+        return stream.read(offset - start)
 
     def poll(self) -> list[dict]:
+        offset = self.offset
+        partial = self.partial
         try:
             with self.path.open("rb") as stream:
                 stat = os.fstat(stream.fileno())
                 identity = self._identity(stat)
                 if (
                     identity != self.identity
-                    or stat.st_size < self.offset
+                    or stat.st_size < offset
                     or self._anchor(stream) != self.anchor
                 ):
-                    self.offset = 0
-                    self.partial = b""
-                self.identity = identity
-                stream.seek(self.offset)
+                    offset = 0
+                    partial = b""
+                stream.seek(offset)
                 data = stream.read()
-                self.offset = stream.tell()
-                self.anchor = self._anchor(stream)
+                offset = stream.tell()
+                anchor = self._anchor(stream, offset)
         except FileNotFoundError:
             return []
-        lines = (self.partial + data).split(b"\n")
-        self.partial = lines.pop()
+        lines = (partial + data).split(b"\n")
+        partial = lines.pop()
         records = []
         for line in lines:
             try:
@@ -290,6 +314,11 @@ class Follower:
                     records.append(item)
             except (ValueError, UnicodeDecodeError):
                 continue
+        # Publish a new cursor only after every read succeeded, so a retry loses no lines.
+        self.offset = offset
+        self.identity = identity
+        self.anchor = anchor
+        self.partial = partial
         return records
 
     def follow(self, stop: threading.Event, interval: float = 0.1):

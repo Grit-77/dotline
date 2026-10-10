@@ -44,9 +44,24 @@ function Invoke-Dotline([string]$Path, [string]$Body = $null) {
     }
     $response = $request.GetResponse()
     try {
-        $reader = New-Object IO.StreamReader($response.GetResponseStream(), $utf8)
-        try { return ($reader.ReadToEnd() | ConvertFrom-Json) }
-        finally { $reader.Dispose() }
+        $buffer = New-Object IO.MemoryStream
+        try {
+            $response.GetResponseStream().CopyTo($buffer)
+            if ($response.ContentLength -ge 0 -and $buffer.Length -ne $response.ContentLength) {
+                throw [IO.IOException]::new('Incomplete server response')
+            }
+            $buffer.Position = 0
+            $reader = New-Object IO.StreamReader($buffer, $utf8)
+            try {
+                $raw = $reader.ReadToEnd()
+                if (!$raw.TrimStart().StartsWith('{')) { throw 'Invalid server response' }
+                foreach ($quoted in [regex]::Matches($raw, '"(?:[^"\\]|\\.)*"')) {
+                    if ($quoted.Value -cmatch '[\x00-\x1f]') { throw 'Invalid server response' }
+                }
+                return ($raw | ConvertFrom-Json)
+            } finally { $reader.Dispose() }
+        }
+        finally { $buffer.Dispose() }
     } finally { $response.Dispose() }
 }
 
@@ -101,10 +116,17 @@ try {
             $body = @{text = $message; topic = $Topic; client_id = $ClientId} | ConvertTo-Json -Compress
             $result = $null
             for ($attempt = 1; $attempt -le 2; $attempt++) {
-                try { $result = Invoke-Dotline '/v1/messages' $body; break }
+                try {
+                    $result = Invoke-Dotline '/v1/messages' $body
+                    if ($result -isnot [PSCustomObject] -or
+                        !($result.id -is [int] -or $result.id -is [long]) -or $result.id -lt 1 -or
+                        ($null -ne $result.PSObject.Properties['duplicate'] -and $result.duplicate -isnot [bool])) {
+                        throw 'Invalid send response'
+                    }
+                    break
+                }
                 catch {
-                    if (!(Test-NetworkError $_)) { throw }
-                    if ($attempt -eq 2) {
+                    if (!(Test-NetworkError $_) -or $attempt -eq 2) {
                         [Console]::Error.WriteLine("dotline: request failed; the message may have arrived. Resend with the same client_id, never a new one: $ClientId")
                         exit 1
                     }

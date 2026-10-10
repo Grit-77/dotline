@@ -134,6 +134,22 @@ def test_watch_buffers_partial_lines_and_file_replacement(mailbox):
     assert follower.poll() == [{"id": 2, "text": "replaced"}]
 
 
+@pytest.mark.parametrize("text", ["in flight", "\U0001f600" * 6000], ids=["short", "multiple_blocks"])
+def test_watch_delivers_initial_partial_line_when_completed(mailbox, text):
+    _, store = mailbox
+    store.send("Old complete message")
+    record = {"id": 2, "text": text}
+    encoded = json.dumps(record, ensure_ascii=False).encode("utf-8")
+    with store.inbox.open("ab") as stream:
+        stream.write(encoded[:-1])
+    follower = Follower(store.inbox)
+    assert follower.poll() == []
+    with store.inbox.open("ab") as stream:
+        stream.write(encoded[-1:] + b"\n")
+    assert follower.poll() == [record]
+    assert follower.poll() == []
+
+
 def test_watch_cli_flushes_without_waiting_for_exit(mailbox):
     _, store = mailbox
     process = subprocess.Popen(
@@ -170,6 +186,49 @@ def test_torn_tail_does_not_join_next_record(mailbox):
         stream.write(b'{"id":2,"text":')
     assert store.send("Next")["id"] == 2
     assert [message["text"] for message in store.messages_after()] == ["First", "Next"]
+
+
+@pytest.mark.parametrize(
+    "tail", [b'{"id":2,"text":"\xf0\x9f', b'{"id":2,"text":"\xff"}\n'],
+    ids=["torn_character", "complete_invalid_record"],
+)
+def test_invalid_utf8_inbox_record_preserves_messages_and_safe_retry(mailbox, tail):
+    _, store = mailbox
+    first = store.send("First", client_id="first-send")
+    with store.inbox.open("ab") as stream:
+        stream.write(tail)
+    assert store.messages_after() == [first]
+    damaged_bytes = store.inbox.read_bytes()
+    assert store.send_once("Retry", client_id="first-send") == (first, True)
+    assert store.inbox.read_bytes() == damaged_bytes
+    next_record, duplicate = store.send_once("Next", client_id="next-send")
+    assert not duplicate
+    assert next_record["id"] == 2
+    assert store.send_once("Retry next", client_id="next-send") == (next_record, True)
+    assert store.messages_after() == [first, next_record]
+    assert store.messages_after(1) == [next_record]
+
+
+@pytest.mark.parametrize(
+    "tail", [b'{"id":2,"to":2,"text":"\xf0\x9f', b'{"id":2,"to":2,"text":"\xff"}\n'],
+    ids=["torn_character", "complete_invalid_record"],
+)
+def test_invalid_utf8_reply_record_preserves_answers_and_allows_next_reply(mailbox, tail):
+    _, store = mailbox
+    store.send("First question")
+    store.send("Second question")
+    first = store.reply(1, "First answer")
+    with store.replies.open("ab") as stream:
+        stream.write(tail)
+    assert store.replies_after() == [first]
+    assert [message["id"] for message in store.pending()] == [2]
+    with pytest.raises(ClaimConflict):
+        store.reply(1, "Duplicate answer")
+    next_record = store.reply(2, "Second answer")
+    assert next_record["id"] == 2
+    assert store.replies_after() == [first, next_record]
+    assert store.replies_after(1) == [next_record]
+    assert store.pending() == []
 
 
 SEND_AT = """

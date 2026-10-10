@@ -8,9 +8,12 @@ mailbox data or company logos. See SECURITY.md for private vulnerability reports
 From the project root:
 
 ```sh
-uv run --with pytest --with . pytest -q
+uv run --with pytest --with-editable . pytest -q
 uvx ruff check .
 ```
+
+The editable install runs the working tree's source, including uncommitted
+changes, instead of a cached wheel from an earlier build.
 
 HTTP tests bind only to loopback with an ephemeral port. They skip with an
 explicit reason if the environment forbids sockets; local mailbox, hook and

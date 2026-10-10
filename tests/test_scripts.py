@@ -191,8 +191,8 @@ def test_shell_script_is_executable_on_posix():
         assert stat.S_IMODE((CLIENTS / "dotline.sh").stat().st_mode) & stat.S_IXUSR
 
 
-def powershell(*args):
-    executable = shutil.which("pwsh") or shutil.which("powershell")
+def powershell(*args, executable=None):
+    executable = executable or shutil.which("pwsh") or shutil.which("powershell")
     if os.name != "nt" or executable is None:
         pytest.skip("the PowerShell client is run only where Windows PowerShell or pwsh is installed")
     command = [executable, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(CLIENTS / "dotline.ps1"), *args]
@@ -254,3 +254,105 @@ def test_powershell_retries_once_with_the_same_client_id_after_a_dropped_connect
     assert result.stdout.strip() == "already delivered: message 5"
     first, second = dropping_server.bodies
     assert first == second and UUID4.fullmatch(first["client_id"])
+
+
+@pytest.fixture
+def invalid_response_server(monkeypatch, request):
+    status, body, truncated = request.param
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.server.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body) + (20 if truncated else 0)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server.bodies = []
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("DOTLINE_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def real_shell_send(mailbox, monkeypatch):
+    if os.name == "nt":
+        bash = Path("C:/Program Files/Git/bin/bash.exe")
+        if not bash.exists():
+            pytest.skip("Git Bash is unavailable")
+        executable = str(bash)
+    else:
+        executable = shutil.which("bash")
+        if executable is None:
+            pytest.skip("bash is unavailable")
+    monkeypatch.setenv("DOTLINE_TOKEN_FILE", mailbox[0].token_path.as_posix())
+    return subprocess.run(
+        [executable, (CLIENTS / "dotline.sh").as_posix(), "send", "private-request-text"],
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+
+
+@pytest.mark.parametrize("invalid_response_server", [
+    (500, b"private-response-text", False),
+    (200, b'{"id":7', False),
+    (200, b'{"unexpected":7}', False),
+    (200, b'{"id":true}', False),
+    (200, b'{"id":', True),
+    (200, b'{"id":7,"ts":"now"}', True),
+    (200, b'[{"id":7,"ts":"now"}]', False),
+    (200, b'{"id":7,"duplicate":null}', False),
+    (200, b'{"id":7,"ts":"literal\nnewline"}', False),
+    (200, b'{"\\u0000id":7}', False),
+], indirect=True)
+@pytest.mark.parametrize("client_kind", ["python", "powershell", "powershell51", "shell"])
+def test_failed_send_reports_recovery_id_for_unusable_http_answers(
+    mailbox, invalid_response_server, client_kind, monkeypatch, capsys
+):
+    if client_kind == "python":
+        from dotline.cli import main
+
+        exit_code = main(["send", "private-request-text"])
+        captured = capsys.readouterr()
+        stdout, stderr = captured.out, captured.err
+    elif client_kind in ("powershell", "powershell51"):
+        executable = None
+        if client_kind == "powershell51":
+            executable = shutil.which("powershell")
+            if executable is None:
+                pytest.skip("Windows PowerShell 5.1 is unavailable")
+        result = powershell("send", "private-request-text", executable=executable)
+        exit_code, stdout, stderr = result.returncode, result.stdout, result.stderr
+    else:
+        result = real_shell_send(mailbox, monkeypatch)
+        exit_code, stdout, stderr = result.returncode, result.stdout, result.stderr
+    assert exit_code == 1
+    assert stdout == ""
+    bodies = invalid_response_server.bodies
+    assert bodies and bodies[0]["client_id"] in stderr
+    assert all(body["client_id"] == bodies[0]["client_id"] for body in bodies)
+    assert len(bodies) <= 2
+    assert "private-request-text" not in stderr
+    assert "private-response-text" not in stderr
+    assert mailbox[0].token() not in stderr
+
+
+@pytest.mark.parametrize("invalid_response_server,expected", [
+    ((201, b'{"id":7,"ts":"escaped\\nnewline"}', False), "7\n"),
+    ((200, b' {"ts":"now", "duplicate":true, "id":7}\r\n', False),
+     "already delivered: message 7\n"),
+], indirect=["invalid_response_server"])
+def test_shell_accepts_complete_send_response(mailbox, invalid_response_server, monkeypatch, expected):
+    result = real_shell_send(mailbox, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
+    assert len(invalid_response_server.bodies) == 1

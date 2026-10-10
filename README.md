@@ -297,8 +297,10 @@ client killed before it read the answer all leave you not knowing whether the
 message arrived. Resending with the same client_id is always safe: you get 201
 if it had not arrived, or 200 with `"duplicate": true` and the original ID if it
 had. A new client_id, or none, is a new request and can create a second message.
-When a send still fails after its retry, the client prints the client_id to
-reuse: `dotline send "text" --client-id <id>`, `dotline.sh send "text"
+If a send fails after contacting the server, including an HTTP error or an
+unusable response, the client prints the client_id to reuse. Network failures
+are retried once automatically; HTTP errors are reported without an automatic
+retry. Recover with `dotline send "text" --client-id <id>`, `dotline.sh send "text"
 --client-id <id>` or `dotline.ps1 send 'text' -ClientId <id>`. Over raw HTTP keep
 the client_id you generated for that attempt. `GET /v1/messages?after=0` shows
 each stored message with its `client_id`.

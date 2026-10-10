@@ -2,6 +2,7 @@ import io
 import json
 import os
 import uuid
+from http.client import IncompleteRead
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -260,3 +261,28 @@ def test_cli_send_with_a_used_client_id_prints_already_delivered(api, capsys):
     assert main(["send", "hello", "--client-id", "resend-me"]) == 0
     assert capsys.readouterr().out == "already delivered: message 1\n"
     assert len(store.messages_after()) == 1
+
+
+def test_client_retries_a_truncated_response_with_the_same_client_id(mailbox):
+    client = Client(mailbox[0])
+    client.opener = ScriptedOpener(
+        IncompleteRead(b'{"id":', 20), {"id": 4, "ts": "then", "duplicate": True}
+    )
+    assert client.send("hello", sleep=lambda seconds: None)["id"] == 4
+    assert client.opener.bodies[0] == client.opener.bodies[1]
+
+
+@pytest.mark.parametrize("outcome", [
+    HTTPError("http://127.0.0.1", 500, "private-response-text", {}, None),
+    {}, {"id": True}, {"id": 0}, {"id": "7"}, [],
+    IncompleteRead(b"private-response-text", 20),
+])
+def test_client_failed_send_preserves_recovery_id_without_private_content(mailbox, outcome):
+    client = Client(mailbox[0])
+    client.opener = ScriptedOpener(outcome, outcome)
+    with pytest.raises(ClientError) as error:
+        client.send("private-request-text", sleep=lambda seconds: None)
+    assert client.opener.bodies[0]["client_id"] in str(error.value)
+    assert "private-request-text" not in str(error.value)
+    assert "private-response-text" not in str(error.value)
+    assert mailbox[0].token() not in str(error.value)

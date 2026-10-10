@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Keep intact mailbox records readable after a write stops inside a UTF-8
+  character, and allow later appends and idempotent retries to recover.
+- Preserve a watcher's unfinished startup line so a message completed after
+  startup is delivered once without replaying earlier complete messages.
+- Preserve the recovery `client_id` when a send receives an HTTP error or an
+  unusable response. The Python client also handles truncated HTTP responses
+  as network failures and retries once with the same ID.
+- Decode channel input as UTF-8 on Windows so non-ASCII replies are preserved
+  even when the system locale uses a different encoding.
 - README FAQ: why a dot that drives a coding agent can read replies but never send
   (the agent's safety review refuses a "read-only" task or an unknown destination),
   and why a message should be sent from a file instead of a quoted shell string.

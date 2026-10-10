@@ -5,6 +5,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from http.client import HTTPException
 
 from .config import Config
 from .store import validate_client_id, validate_text
@@ -46,7 +47,7 @@ class Client:
                 result = json.load(response)
         except urllib.error.HTTPError as error:
             raise ClientError(f"HTTP {error.code}; check the URL, token file and request limits") from None
-        except (OSError, ValueError):
+        except (OSError, ValueError, HTTPException):
             raise NetworkError("request failed; check the URL and server availability") from None
         if not isinstance(result, dict):
             raise ClientError("server returned an invalid response")
@@ -69,17 +70,22 @@ class Client:
             except ValueError as error:
                 raise ClientError(str(error)) from None
         body = {"text": text, "topic": topic, "client_id": client_id}
-        try:
-            return self.request("/v1/messages", body)
-        except NetworkError:
-            sleep(RETRY_PAUSE)
-        try:
-            return self.request("/v1/messages", body)
-        except NetworkError as error:
-            raise NetworkError(
-                f"{error}; the message may have arrived. "
-                f"Resend with the same client_id, never a new one: {client_id}"
-            ) from None
+        for attempt in range(2):
+            try:
+                result = self.request("/v1/messages", body)
+                if type(result.get("id")) is not int or result["id"] < 1:
+                    raise NetworkError("server returned an invalid send response")
+                if "duplicate" in result and type(result["duplicate"]) is not bool:
+                    raise NetworkError("server returned an invalid send response")
+                return result
+            except ClientError as error:
+                if isinstance(error, NetworkError) and attempt == 0:
+                    sleep(RETRY_PAUSE)
+                    continue
+                raise type(error)(
+                    f"{error}; the message may have arrived. "
+                    f"Resend with the same client_id, never a new one: {client_id}"
+                ) from None
 
     def replies(self, after: int = 0) -> list[dict]:
         if after < 0:

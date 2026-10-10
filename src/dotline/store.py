@@ -92,12 +92,12 @@ class Store:
         if not path.exists():
             return []
         records = []
-        with path.open("r", encoding="utf-8") as stream:
+        with path.open("rb") as stream:
             for line in stream:
                 # A torn final write must not hide earlier durable messages.
                 try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
+                    record = json.loads(line.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if isinstance(record, dict) and type(record.get("id")) is int:
                     records.append(record)
@@ -236,6 +236,19 @@ class Follower:
                 self.offset = stream.seek(0, os.SEEK_END)
                 self.identity = self._identity(os.fstat(stream.fileno()))
                 self.anchor = self._anchor(stream)
+                # Keep the unfinished line so an append completing it is delivered.
+                # Scan backwards in chunks without loading the complete backlog.
+                end = self.offset
+                tail = []
+                while end:
+                    start = max(0, end - 8192)
+                    stream.seek(start)
+                    chunk = stream.read(end - start)
+                    tail.append(chunk.rsplit(b"\n", 1)[-1])
+                    if b"\n" in chunk:
+                        break
+                    end = start
+                self.partial = b"".join(reversed(tail))
         except FileNotFoundError:
             pass
 

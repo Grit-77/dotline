@@ -171,3 +171,34 @@ def test_channel_real_stdio_flushes_protocol_and_events(mailbox):
         thread.join(timeout=2)
         process.stdout.close()
         process.stderr.close()
+
+
+@pytest.mark.parametrize("reply_text", ["café", "Türkçe 你好 😁"])
+def test_channel_real_stdio_reads_utf8_replies_under_a_non_utf8_locale(
+    mailbox, monkeypatch, reply_text,
+):
+    _, store = mailbox
+    store.send("Question")
+    # Windows pipes commonly default to a legacy locale encoding. Force that
+    # startup encoding on every platform while sending the MCP UTF-8 protocol.
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1254")
+    messages = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+        {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "reply", "arguments": {"message_id": 1, "text": reply_text},
+            },
+        },
+    ]
+    payload = "".join(json.dumps(message, ensure_ascii=False) + "\n" for message in messages)
+    process = subprocess.run(
+        [sys.executable, "-m", "dotline", "channel"], input=payload.encode("utf-8"),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+    )
+    assert process.returncode == 0, process.stderr.decode("utf-8", errors="replace")
+    responses = [json.loads(line) for line in process.stdout.decode("utf-8").splitlines()]
+    assert responses[-1]["id"] == 2
+    assert not responses[-1]["result"].get("isError", False)
+    assert store.replies_after()[0]["text"] == reply_text

@@ -4,7 +4,14 @@ set -eu
 set +x
 umask 077
 
-die() { printf '%s\n' "dotline: $1" >&2; exit 1; }
+die() {
+    printf '%s' "dotline: $1" >&2
+    if [[ ${send_attempted:-0} == 1 ]]; then
+        printf '%s' "; the message may have arrived. Resend with the same client_id, never a new one: $client_id" >&2
+    fi
+    printf '\n' >&2
+    exit 1
+}
 work=$(mktemp -d "${TMPDIR:-/tmp}/dotline.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT TERM
@@ -80,7 +87,7 @@ post_message() {
             --data-binary "@$work/body" "$url/v1/messages" > "$work/response" || rc=$?
         ((rc != 0)) || break
         ((rc != 22)) || die 'HTTP request failed'
-        ((attempt == 1)) || die "HTTP request failed; the message may have arrived. Resend with the same client_id, never a new one: $client_id"
+        ((attempt == 1)) || die 'HTTP request failed'
         sleep 1
     done
     response=$(< "$work/response")
@@ -118,6 +125,7 @@ take_string() {
     while ((cursor < ${#response})); do
         char=${response:cursor:1}; cursor=$((cursor + 1))
         [[ $char != '"' ]] || return 0
+        [[ $char > $'\x1f' ]] || die 'invalid server JSON'
         if [[ $char == '\' ]]; then
             escape=${response:cursor:1}; cursor=$((cursor + 1))
             case "$escape" in
@@ -127,6 +135,7 @@ take_string() {
                 u)
                     digits=${response:cursor:4}; cursor=$((cursor + 4))
                     [[ $digits =~ ^[0-9a-fA-F]{4}$ ]] || die 'invalid server JSON'
+                    [[ ${strict_send_json:-0} != 1 || $digits != 0000 ]] || die 'invalid server JSON'
                     printf -v char '%b' "\\u$digits" ;;
                 *) die 'invalid server JSON' ;;
             esac
@@ -170,6 +179,51 @@ find_reply() {
     done
 }
 
+skip_space() {
+    while [[ ${response:cursor:1} == [[:space:]] ]]; do cursor=$((cursor + 1)); done
+}
+
+# Send responses are flat JSON objects. Consume the whole object before trusting its id.
+read_send_response() {
+    local cursor=0 parsed key value kind char strict_send_json=1
+    message_number=''; duplicate=0
+    skip_space
+    [[ ${response:cursor:1} == '{' ]] || die 'invalid server response'
+    cursor=$((cursor + 1)); skip_space
+    while [[ ${response:cursor:1} != '}' ]]; do
+        [[ ${response:cursor:1} == '"' ]] || die 'invalid server response'
+        take_string; key=$parsed; skip_space
+        [[ ${response:cursor:1} == ':' ]] || die 'invalid server response'
+        cursor=$((cursor + 1)); skip_space
+        if [[ ${response:cursor:1} == '"' ]]; then
+            take_string; value=$parsed; kind=string
+        else
+            value=''; kind=scalar
+            while ((cursor < ${#response})); do
+                char=${response:cursor:1}
+                [[ $char != ',' && $char != '}' && $char != [[:space:]] ]] || break
+                value=$value$char; cursor=$((cursor + 1))
+            done
+            [[ $value =~ ^(0|[1-9][0-9]*|true|false|null)$ ]] || die 'invalid server response'
+        fi
+        case "$key" in
+            id)
+                [[ $kind == scalar && $value =~ ^[1-9][0-9]*$ ]] || die 'invalid server response'
+                message_number=$value ;;
+            duplicate)
+                [[ $kind == scalar && ( $value == true || $value == false ) ]] || die 'invalid server response'
+                duplicate=0; [[ $value != true ]] || duplicate=1 ;;
+        esac
+        skip_space
+        [[ ${response:cursor:1} != '}' ]] || break
+        [[ ${response:cursor:1} == ',' ]] || die 'invalid server response'
+        cursor=$((cursor + 1)); skip_space
+        [[ ${response:cursor:1} != '}' ]] || die 'invalid server response'
+    done
+    cursor=$((cursor + 1)); skip_space
+    ((cursor == ${#response})) && [[ -n $message_number ]] || die 'invalid server response'
+}
+
 command=${1:-}; [[ -n $command ]] || die 'usage: dotline.sh send|wait|replies|health [arguments]'
 shift
 topic='' file='' minutes=10 after=0 text='' message_id='' client_id='' client_id_set=0
@@ -208,10 +262,10 @@ case "$command" in
             printf ',"client_id":'; json_string "$client_id"
             printf '}'
         } > "$work/body"
+        send_attempted=1
         post_message
-        [[ $response =~ \"id\"[[:space:]]*:[[:space:]]*([0-9]+) ]] || die 'invalid server response'
-        message_number=${BASH_REMATCH[1]}
-        if [[ $response =~ \"duplicate\"[[:space:]]*:[[:space:]]*true ]]; then
+        read_send_response
+        if ((duplicate)); then
             printf 'already delivered: message %s\n' "$message_number"
         else
             printf '%s\n' "$message_number"

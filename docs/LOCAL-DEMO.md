@@ -43,7 +43,7 @@ Remove-Item Env:DOTLINE_TOKEN_FILE -ErrorAction SilentlyContinue
 .\.venv\Scripts\dotline.exe pending --json
 # Use the ID printed by send in place of 1:
 .\.venv\Scripts\dotline.exe claim 1 --by manual-demo
-.\.venv\Scripts\dotline.exe reply 1 --by manual-demo 'Synthetic local demo reply'
+.\.venv\Scripts\dotline.exe reply 1 'Synthetic local demo reply' --by manual-demo
 .\.venv\Scripts\dotline.exe wait 1 --minutes 0.1
 .\.venv\Scripts\dotline.exe replies
 ```

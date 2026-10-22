@@ -288,7 +288,7 @@ an invalid claim instead of replacing it or treating it as unclaimed. Inspect
 and repair the file with the sessions stopped before trying again.
 
 For Monitor, always claim before working. Optionally use
-`dotline reply <id> --by <session_id> "answer"` to require the matching claim.
+`dotline reply <id> "answer" --by <session_id>` to require the matching claim.
 The default reply command trusts cooperating local sessions; local file access
 is not a security boundary. Long work can outlive the 30-minute lease: check
 ownership and avoid duplicate side effects. Expiry does not undo work.

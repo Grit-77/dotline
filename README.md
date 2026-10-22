@@ -25,6 +25,14 @@ flowchart LR
     R -->|HTTPS polling| D
 ```
 
+## Try the mailbox locally first
+
+[Send, claim and answer a synthetic message without connecting either agent →](docs/LOCAL-DEMO.md)
+
+The isolated PowerShell walkthrough uses a separate virtual environment and
+mailbox on loopback. You supply the reply manually; it tests the protocol, not
+native ChatGPT/Claude integration. Then connect your actual coding session below.
+
 ## Quickstart: three steps
 
 1. **Install and initialize on the computer running Claude Code.** 
@@ -34,8 +42,9 @@ flowchart LR
    dotline init
    ```
 
-   Or run commands without a persistent install: `uvx --from . dotline init`.
-   Use `uvx --from . dotline ...` in place of `dotline ...` throughout this guide.
+   If you already cloned this repository, run `uvx --from . dotline init`
+   **from the clone's root** for a non-persistent alternative. In that checkout,
+   use `uvx --from . dotline ...` in place of `dotline ...` throughout this guide.
    For hooks and MCP, install with pipx so `dotline` is on the session's PATH.
    Init prints only the token file path. It preserves existing settings and the token.
 

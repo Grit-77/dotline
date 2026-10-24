@@ -126,7 +126,7 @@ take_string() {
         char=${response:cursor:1}; cursor=$((cursor + 1))
         [[ $char != '"' ]] || return 0
         printf -v codepoint '%d' "'$char"
-        ((codepoint >= 32)) || die 'invalid server JSON'
+        ((codepoint < 0 || codepoint >= 32)) || die 'invalid server JSON'
         if [[ $char == '\' ]]; then
             escape=${response:cursor:1}; cursor=$((cursor + 1))
             case "$escape" in

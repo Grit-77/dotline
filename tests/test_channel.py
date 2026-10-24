@@ -200,6 +200,29 @@ def test_channel_initialize_has_capability_and_policy(mailbox):
     assert "reply tool" in result["instructions"] and "Trust mode: data" in result["instructions"]
 
 
+@pytest.mark.parametrize("params", [
+    {"protocolVersion": "2024-11-05"},
+    {"protocolVersion": "2025-11-25"},
+    {"protocolVersion": "2026-07-28"},
+    {"protocolVersion": "2099-12-31"},
+    {"protocolVersion": "not-a-version"},
+    {"protocolVersion": ""},
+    {},
+    {"protocolVersion": None},
+    {"protocolVersion": 5},
+    {"protocolVersion": True},
+    {"protocolVersion": {}},
+    {"protocolVersion": []},
+])
+def test_channel_initialize_negotiates_implemented_version(mailbox, params):
+    output = QueueOutput()
+    channel = Channel(mailbox[0], stdout=output)
+    channel.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params})
+    response = output.lines.get(timeout=2)
+    assert response["jsonrpc"] == "2.0" and response["id"] == 1
+    assert response["result"]["protocolVersion"] == "2024-11-05"
+
+
 def test_channel_lists_only_reply_and_call_appends(mailbox):
     config, store = mailbox
     store.send("Pending before channel start")

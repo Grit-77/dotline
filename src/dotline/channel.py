@@ -112,9 +112,8 @@ class Channel:
             return
         if method == "initialize":
             self.initialized = True
-            version = params.get("protocolVersion", "2024-11-05")
             self.result(message_id, {
-                "protocolVersion": version if isinstance(version, str) else "2024-11-05",
+                "protocolVersion": "2024-11-05",
                 "capabilities": {"experimental": {"claude/channel": {}}, "tools": {}},
                 "serverInfo": {"name": "dotline", "version": __version__},
                 "instructions": (

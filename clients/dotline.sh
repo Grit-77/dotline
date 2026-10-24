@@ -119,13 +119,14 @@ json_string() {
 # A tokenizer for the API's flat reply records. Strings are consumed whole,
 # so braces or apparent JSON inside message text cannot change the selection.
 take_string() {
-    local char escape digits
+    local char escape digits codepoint
     parsed=''
     cursor=$((cursor + 1))
     while ((cursor < ${#response})); do
         char=${response:cursor:1}; cursor=$((cursor + 1))
         [[ $char != '"' ]] || return 0
-        [[ $char > $'\x1f' ]] || die 'invalid server JSON'
+        printf -v codepoint '%d' "'$char"
+        ((codepoint >= 32)) || die 'invalid server JSON'
         if [[ $char == '\' ]]; then
             escape=${response:cursor:1}; cursor=$((cursor + 1))
             case "$escape" in

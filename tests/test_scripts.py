@@ -515,3 +515,24 @@ def test_shell_accepts_complete_send_response(mailbox, invalid_response_server, 
     assert result.returncode == 0, result.stderr
     assert result.stdout == expected
     assert len(invalid_response_server.bodies) == 1
+
+
+@pytest.mark.parametrize("invalid_response_server", [
+    (200, b'{"id":7,"ts":"before' + bytes([code]) + b'after"}', False)
+    for code in [1, 9, 10, 13, 31]
+], indirect=True)
+def test_shell_rejects_raw_json_controls(mailbox, invalid_response_server, monkeypatch):
+    result = real_shell_send(mailbox, monkeypatch)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert invalid_response_server.bodies[0]["client_id"] in result.stderr
+
+
+@pytest.mark.parametrize("invalid_response_server", [
+    (200, json.dumps({"id": 7, "ts": value}, ensure_ascii=False).encode("utf-8"), False)
+    for value in ["valid-" + chr(127), "café", "snowman ☃", "escaped\nnewline", "escaped-" + chr(31)]
+], indirect=True)
+def test_shell_preserves_valid_json_string_values(mailbox, invalid_response_server, monkeypatch):
+    result = real_shell_send(mailbox, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "7"

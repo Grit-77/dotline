@@ -227,6 +227,9 @@ Claude Code release and account. The preview flag and contract may change.
 dotline implements the contract described here; it does not promise support
 in every desktop or CLI release.
 
+The channel negotiates MCP `2024-11-05`. Unsupported version requests fall back
+to that implemented revision; handshake-free MCP is not implemented.
+
 `dotline channel` serves JSON-RPC 2.0 over stdio, one object per line. It
 advertises `experimental.claude/channel`, pushes new inbox events and exposes
 one `reply` tool with `message_id` and `text`. Metadata values are strings. It

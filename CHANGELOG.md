@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.2 — 2026-10-26
+
 - Keep the channel's delivery loop alive after transient mailbox read or claim
   errors, preserving unread messages and the current notification batch.
 - Validate stored claim owners and timestamps before evaluating expiry, so

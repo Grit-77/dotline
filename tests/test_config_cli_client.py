@@ -232,7 +232,7 @@ def test_missing_token_file_errors_do_not_print_its_content(mailbox, monkeypatch
 def test_package_version_and_runtime_dependencies():
     from dotline import __version__
 
-    assert __version__ == "0.1.1"
+    assert __version__ == "0.1.2"
     project = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dependencies = []' in project
     assert 'requires-python = ">=3.10"' in project
